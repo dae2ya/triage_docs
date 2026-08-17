@@ -17,17 +17,23 @@ PDF (휴리스틱):
   - dense_ratio  : 텍스트 과밀 페이지 비율
   - img_per_page : 페이지당 래스터 이미지 수 (로고/장식에 오염되므로 단독 신뢰 X)
   → 벡터/텍스트 과밀 = Docling이 차트를 파편화 → "LLM Parser".
-     이미지·텍스트 기반+과밀 낮음 → "Docling". 텍스트·이미지 둘다 희박 → "검토"(스캔본/빈).
+     이미지 거의 없는 순수 텍스트 → "Default"(내장 텍스트 추출로 충분).
+     이미지 섞인 텍스트+과밀 낮음 → "Docling". 텍스트·이미지 둘다 희박 → "검토"(스캔본/빈).
+
+Data 360 Search Index Builder의 파서 3종에 맞춘 매핑 (Parsing 단계 UI):
+  - Default     "Extract text with built-in settings"          = 텍스트만. 표·이미지 없는 순수 텍스트 문서
+  - Docling     "Extracts text and tables (open-source models)" = 텍스트 + 표. 표·수치가 있는 문서
+  - LLM-based   "Extract text, images, and visual elements"     = 이미지/벡터차트/시각요소 위주
 
 Office (구조가 명확 → 사실 기반):
-  OOXML은 차트가 charts/chart*.xml 로 "구조적으로" 박혀 있어 PDF식 파편화가 없다.
+  OOXML은 차트가 charts/chart*.xml, 표가 <w:tbl>/<a:tbl> 로 "구조적으로" 박혀 있다.
   - charts : ppt|word|xl/charts/chart*.xml 개수 = 네이티브 차트 수
   - media  : ppt|word|xl/media/* 개수 = 삽입 이미지 수
+  - tables : <w:tbl>(docx)/<a:tbl>(pptx) 개수 = 본문 표 수
   - text   : 슬라이드/문서 XML의 텍스트런 길이
-  → 차트가 많다: 차트는 XML 데이터라 기본/Docling 파서가 구조적으로 잘 읽음.
-     단, 차트를 "그림처럼" 캡처해 넣었거나(media 다수) 텍스트가 거의 없으면 이미지 처리가 유리.
   판정:
-    - 텍스트가 실질적으로 있음(+차트/이미지 보통)  → "Docling" (구조 파싱으로 충분)
+    - 텍스트 있음 + 표·차트·이미지 존재            → "Docling" (표 구조 파싱 필요)
+    - 텍스트 있음 + 표·차트·이미지 전무            → "Default" (내장 텍스트 추출로 충분)
     - 텍스트 거의 없고 이미지 위주(슬라이드형/캡처)  → "LLM Parser" (이미지→의미 재구성)
     - 텍스트·차트·이미지 모두 희박(빈 파일)          → "검토"
   XLSX는 본질이 표/수치 → 항상 "Docling"(표는 구조 파싱이 정답), 단 빈 시트는 "검토".
@@ -64,6 +70,8 @@ HEAVY = 900           # PDF: 이 문자수 초과 = "텍스트 과밀" 페이지
 VEC_HEAVY = 300       # PDF: 페이지 path 연산자 이 수 초과 = "벡터 과밀"
 SAMPLE_PAGES = 40     # PDF: 페이지 많으면 앞뒤 표본만 검사 (속도)
 OFFICE_TEXT_MIN = 200 # Office: 이 문자수 미만이면 "텍스트 실질 없음"으로 간주
+# Default 파서(텍스트만) vs Docling(텍스트+표) 분기 임계
+PDF_TEXT_ONLY_IMG = 0.15  # PDF: 페이지당 이미지 이 값 미만이면 "이미지 없는 텍스트 문서"로 봄
 LARGE_BYTES = 75 * 1024 * 1024        # 경고선: 이 크기 초과면 "대용량"(파싱/임베딩 부담) — 축소 권장
 OVERSIZE_BYTES = 2 * 1024 * 1024 * 1024  # 하드 한계: Market Insight Uploader 2GB/file → 이 초과면 "업로드 불가"
 HASH_CHUNK = 1 << 20  # 해시 읽기 블록 (1MB)
@@ -200,6 +208,9 @@ def analyze_pdf(path, out):
         parser, why = "LLM Parser", f"벡터/텍스트 과밀 (vec {vec_ratio:.0%}, text {dense_ratio:.0%})"
     elif txt_per_page < 50 and img_per_page < 0.3:
         parser, why = "검토", f"텍스트·이미지 거의 없음 (txt/pg {txt_per_page:.0f}) — 스캔본/빈파일 의심, OCR 확인"
+    elif img_per_page < PDF_TEXT_ONLY_IMG:
+        # 이미지·벡터차트 거의 없는 순수 텍스트 PDF → Default(내장 설정으로 텍스트만 추출)로 충분
+        parser, why = "Default", f"텍스트 위주(이미지 거의 없음) — 내장 텍스트 추출로 충분 (img/pg {img_per_page:.2f}, txt/pg {txt_per_page:.0f}, vec {vec_ratio:.0%})"
     else:
         parser, why = "Docling", f"이미지·텍스트 기반, 과밀 낮음 (img/pg {img_per_page:.2f}, vec {vec_ratio:.0%}, txt/pg {txt_per_page:.0f})"
 
@@ -261,6 +272,25 @@ def analyze_office(path, ext, out):
     except Exception:
         pass
 
+    # 표(table) 감지: Docling(text+tables) vs Default(text only) 분기 신호
+    #   docx=<w:tbl>, pptx=<a:tbl>. body XML만 다시 훑어 표 개수 카운트.
+    tables = 0
+    try:
+        if ext == ".docx":
+            tbl_re, tbl_targets = re.compile(rb"<w:tbl[ >]"), ["word/document.xml"]
+        elif ext == ".pptx":
+            tbl_re, tbl_targets = re.compile(rb"<a:tbl[ >]"), \
+                [n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)]
+        else:
+            tbl_re, tbl_targets = None, []
+        for t in tbl_targets:
+            try:
+                tables += len(tbl_re.findall(zf.read(t)))
+            except KeyError:
+                continue
+    except Exception:
+        pass
+
     # 슬라이드/시트 수 (규모 참고)
     slides = sum(1 for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n))
     sheets = sum(1 for n in names if re.match(r"xl/worksheets/sheet\d+\.xml$", n))
@@ -274,14 +304,18 @@ def analyze_office(path, ext, out):
     else:
         # docx / pptx
         has_text = text_len >= OFFICE_TEXT_MIN
+        extra = f", slides {slides}" if ext == ".pptx" else ""
         if not has_text and (media > 0 or charts > 0):
             # 텍스트가 거의 없고 그림/차트 위주 = 캡처·이미지 슬라이드형 → 이미지 의미 재구성 유리
             parser, why, ok = "LLM Parser", f"텍스트 희박+이미지/차트 위주 (text {text_len}, media {media}, charts {charts}) — 이미지 처리 유리", True
         elif not has_text and media == 0 and charts == 0:
             parser, why, ok = "검토", f"내용 거의 없음 (text {text_len}, media 0, charts 0) — 빈 파일 의심", True
+        elif tables > 0 or charts > 0 or media > 0:
+            # 텍스트 있음 + 표/차트/이미지 존재 → 구조(표) 파싱이 필요 → Docling
+            parser, why, ok = "Docling", f"텍스트+표/그래픽 — 구조 파싱 적합 (text {text_len}, tables {tables}, charts {charts}, media {media}{extra})", True
         else:
-            extra = f", slides {slides}" if ext == ".pptx" else ""
-            parser, why, ok = "Docling", f"텍스트 기반 문서 — 구조 파싱 적합 (text {text_len}, charts {charts}, media {media}{extra})", True
+            # 텍스트만 있고 표·차트·이미지 없음 → 내장 텍스트 추출로 충분 → Default
+            parser, why, ok = "Default", f"텍스트 위주(표·이미지 없음) — 내장 텍스트 추출로 충분 (text {text_len}, tables 0, charts 0, media 0{extra})", True
 
     out.update({"ok": ok, "reason": "정상", "parser": parser, "why": why,
                 "img_signal": media > 0})
@@ -354,7 +388,7 @@ def collect_docs(args, recursive=False, exclude_root=None):
 
 
 # 권장 파싱방식 → 폴더 이름
-DEST_FOLDER = {"LLM Parser": "LLM_Parser", "Docling": "Docling", "검토": "검토"}
+DEST_FOLDER = {"LLM Parser": "LLM_Parser", "Docling": "Docling", "Default": "Default", "검토": "검토"}
 
 
 def size_bucket(r):
@@ -385,7 +419,7 @@ def move_files(rows, out_root):
       - 중복              → _duplicates
       - 업로드불가(2GB↑)   → _oversize (분할/변환 필수; 최우선 분리)
       - 대용량(>경고선)    → _large    (파싱 비용 절감용 별도 분리; 파서 폴더보다 우선)
-      - 그 외 원본/고유    → 권장_파싱방식 폴더 (LLM_Parser/Docling/검토)"""
+      - 그 외 원본/고유    → 권장_파싱방식 폴더 (LLM_Parser/Docling/Default/검토)"""
     moved, errs = 0, 0
     summary = {}
     for r in rows:
@@ -632,17 +666,18 @@ def main():
         else:
             r["dup"], r["origin"] = "고유", ""
 
-    # 정렬: 손상 먼저 → LLM Parser > 검토 > Docling
-    porder = {"LLM Parser": 0, "검토": 1, "Docling": 2, "-": 3}
+    # 정렬: 손상 먼저 → LLM Parser > 검토 > Docling > Default
+    porder = {"LLM Parser": 0, "검토": 1, "Docling": 2, "Default": 3, "-": 4}
     rows.sort(key=lambda r: (r.get("ok", False), porder.get(r.get("parser", "-"), 9), r["name"].lower()))
 
     nLLM = sum(1 for r in rows if r.get("parser") == "LLM Parser")
     nDoc = sum(1 for r in rows if r.get("parser") == "Docling")
+    nDef = sum(1 for r in rows if r.get("parser") == "Default")
     nRev = sum(1 for r in rows if r.get("parser") == "검토")
     nEnc = sum(1 for r in rows if "암호화" in (r.get("reason") or ""))
     nBad = sum(1 for r in rows if not r.get("ok"))
     nDup = sum(1 for r in rows if r.get("dup") == "중복")
-    print(f"\n결과: LLM Parser={nLLM}  Docling={nDoc}  검토={nRev}  손상={nBad}(암호화 {nEnc})  |  중복={nDup}")
+    print(f"\n결과: LLM Parser={nLLM}  Docling={nDoc}  Default={nDef}  검토={nRev}  손상={nBad}(암호화 {nEnc})  |  중복={nDup}")
 
     # 유형별 개수·용량 분포 (No.1) — 확장자별 누적
     dist = {}
@@ -708,7 +743,7 @@ def main():
         s = [["Data 360 업로드 사전점검 요약"], [],
              ["항목", "값"],
              ["총 파일 수", len(rows)],
-             ["LLM Parser", nLLM], ["Docling", nDoc], ["검토", nRev],
+             ["LLM Parser", nLLM], ["Docling", nDoc], ["Default", nDef], ["검토", nRev],
              ["손상", nBad], ["  └ 암호화", nEnc],
              ["중복", nDup],
              ["파일명 검사 위반", nName], ["변환 대상", nConv],

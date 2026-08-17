@@ -8,7 +8,7 @@
   :root {
     --bg: #ffffff; --fg: #1a1a2e; --muted: #6b7280;
     --border: #e5e7eb; --code-bg: #f6f8fa; --accent: #0d6efd;
-    --llm: #d9480f; --doc: #2b8a3e; --rev: #b08900; --bad: #868e96;
+    --llm: #d9480f; --doc: #2b8a3e; --rev: #b08900; --bad: #868e96; --def: #1971c2;
   }
   * { box-sizing: border-box; }
   body {
@@ -42,6 +42,7 @@
          font-size: 0.8rem; font-weight: 600; color: #fff; white-space: nowrap; }
   .t-llm { background: var(--llm); } .t-doc { background: var(--doc); }
   .t-rev { background: var(--rev); } .t-bad { background: var(--bad); }
+  .t-def { background: var(--def); }
   .note {
     background: #f0f7ff; border-left: 4px solid var(--accent);
     padding: 12px 16px; border-radius: 4px; margin: 16px 0; font-size: 0.9rem;
@@ -126,6 +127,12 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
 
 <h2>3. 권장 파싱방식 판정 기준</h2>
 
+<p>Data&nbsp;360 Search Index Builder의 <b>Parsing</b> 단계는 파서 3종을 고릅니다 —
+<span class="tag t-def">Default</span> "Extract text with built-in settings"(텍스트만),
+<span class="tag t-doc">Docling</span> "Extracts text and tables"(텍스트+표),
+<span class="tag t-llm">LLM Parser</span> "Extract text, images, and visual elements"(이미지·시각요소).
+이 도구는 파일 단서를 보고 이 셋(과 사람 확인이 필요한 <span class="tag t-rev">검토</span>) 중 하나로 판정합니다.</p>
+
 <h3>PDF — 파싱 없이 읽는 단서 3가지</h3>
 <p class="muted">모두 파일을 열어 개수·길이·비율만 세는 값이라 빠르고 가볍습니다. 페이지가 많으면 앞뒤 40장만 표본으로 봅니다.</p>
 <ul>
@@ -138,7 +145,8 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
 <table>
   <tr><th>이런 파일이면</th><th>판정</th><th>왜냐하면</th></tr>
   <tr><td>벡터 그래픽이나 글자가 빽빽함</td><td><span class="tag t-llm">LLM Parser</span></td><td>벡터 차트는 Docling이 글자 조각으로 잘게 쪼개 버립니다. LLM이 그림 전체를 보고 의미를 되살립니다.</td></tr>
-  <tr><td>이미지·텍스트 위주에 빽빽하진 않음</td><td><span class="tag t-doc">Docling</span></td><td>구조대로 읽어도 충분합니다.</td></tr>
+  <tr><td>이미지가 거의 없는 순수 텍스트 (페이지당 이미지 0.15 미만)</td><td><span class="tag t-def">Default</span></td><td>이미지도 표도 없는 글 위주 문서라 내장 텍스트 추출로 충분합니다. 가장 가볍고 저렴합니다.</td></tr>
+  <tr><td>이미지 섞인 텍스트 위주에 빽빽하진 않음</td><td><span class="tag t-doc">Docling</span></td><td>구조대로 읽어도 충분합니다.</td></tr>
   <tr><td>글자도 이미지도 거의 없음</td><td><span class="tag t-rev">검토</span></td><td>스캔본이거나 빈 파일일 수 있어 OCR 여부를 사람이 확인해야 합니다.</td></tr>
 </table>
 
@@ -147,7 +155,8 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
 그래서 차트 XML·이미지(<code>media/</code>)·텍스트 개수를 직접 세어 판정합니다.</p>
 <table>
   <tr><th>이런 파일이면 (docx·pptx)</th><th>판정</th><th>왜냐하면</th></tr>
-  <tr><td>읽을 만한 텍스트가 있음</td><td><span class="tag t-doc">Docling</span></td><td>구조대로 읽어도 충분합니다.</td></tr>
+  <tr><td>텍스트가 있고 <b>표·차트·이미지</b>가 들어 있음</td><td><span class="tag t-doc">Docling</span></td><td>표(<code>&lt;w:tbl&gt;</code>/<code>&lt;a:tbl&gt;</code>) 구조를 살려 읽어야 하므로 Docling이 맞습니다.</td></tr>
+  <tr><td>텍스트만 있고 표·차트·이미지가 전혀 없음</td><td><span class="tag t-def">Default</span></td><td>글 위주 문서라 내장 텍스트 추출로 충분합니다. 가장 가볍고 저렴합니다.</td></tr>
   <tr><td>텍스트는 거의 없고 이미지 위주</td><td><span class="tag t-llm">LLM Parser</span></td><td>화면을 캡처해 붙인 슬라이드형이라, 이미지에서 의미를 다시 읽어내야 합니다.</td></tr>
   <tr><td>텍스트·차트·이미지가 모두 없음</td><td><span class="tag t-rev">검토</span></td><td>빈 파일일 수 있습니다.</td></tr>
 </table>
@@ -189,7 +198,7 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
   <tr><td>2</td><td>중복</td><td><code>_duplicates</code></td></tr>
   <tr><td>3</td><td><b>업로드불가(2&nbsp;GB↑)</b></td><td><code>_oversize</code></td></tr>
   <tr><td>4</td><td><b>대용량(75&nbsp;MB↑)</b></td><td><code>_large</code></td></tr>
-  <tr><td>5</td><td>그 외 원본·고유</td><td><code>LLM_Parser</code> · <code>Docling</code> · <code>검토</code></td></tr>
+  <tr><td>5</td><td>그 외 원본·고유</td><td><code>LLM_Parser</code> · <code>Docling</code> · <code>Default</code> · <code>검토</code></td></tr>
 </table>
 <p class="muted">※ <b>2&nbsp;GB 초과</b>는 Uploader가 업로드 자체를 거부하므로 최우선으로 <code>_oversize</code>로 분리합니다 — 분할·변환이 필수입니다.
 대용량(75&nbsp;MB↑)은 파서 폴더보다 먼저 <code>_large</code>로 빠집니다 — 파싱에 넣기 전에 용량부터 줄이라는 뜻입니다.
@@ -226,7 +235,7 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
   <tr><td>번호</td><td>정렬한 뒤 매긴 순번</td></tr>
   <tr><td>파일명 / 경로</td><td>파일 이름과 전체 경로(<code>--move</code> 후에는 옮겨진 경로). <span class="muted">한글 이름은 Excel에서 깨지지 않도록 NFC(조합형)로 정규화해 적습니다.</span></td></tr>
   <tr><td>형식</td><td>pdf · docx · pptx · xlsx · doc …</td></tr>
-  <tr><td>권장_파싱방식</td><td>LLM Parser · Docling · 검토</td></tr>
+  <tr><td>권장_파싱방식</td><td>Default · Docling · LLM Parser · 검토</td></tr>
   <tr><td>이유</td><td>그렇게 판정한 근거(단서 수치 포함)</td></tr>
   <tr><td>용량</td><td>1&nbsp;GB 이상은 GB, 그 외 MB(예: <code>73.9MB</code>, <code>2.31GB</code>)</td></tr>
   <tr><td>용량_상태</td><td><code>업로드불가</code>(2&nbsp;GB↑) / <code>대용량</code>(경고선↑) / 빈칸</td></tr>
@@ -236,8 +245,8 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
   <tr><td>중복여부 / 원본파일</td><td>원본·중복·고유 / 같은 내용인 원본 파일명</td></tr>
   <tr><td>정상여부</td><td>정상 / 손상(원인) / <b>암호화</b>(원인)</td></tr>
 </table>
-<p class="muted">손댈 파일이 먼저 눈에 띄도록 정렬합니다: 손상 → LLM&nbsp;Parser → 검토 → Docling, 그 안에서는 이름순입니다.
-실행하면 화면 맨 아래에 파서별 요약(<code>LLM Parser=n  Docling=n  검토=n  손상=n  |  중복=n</code>),
+<p class="muted">손댈 파일이 먼저 눈에 띄도록 정렬합니다: 손상 → LLM&nbsp;Parser → 검토 → Docling → Default, 그 안에서는 이름순입니다.
+실행하면 화면 맨 아래에 파서별 요약(<code>LLM Parser=n  Docling=n  Default=n  검토=n  손상=n  |  중복=n</code>),
 <b>유형별 분포</b>(확장자별 개수·총용량), 파일명 검사·변환 대상 건수, 그리고 <b>업로드 불가(2&nbsp;GB↑)</b>·<b>대용량(경고선↑)</b> 목록이 뜹니다.</p>
 <p class="muted">※ macOS는 파일명을 NFD(분해형)로 저장하기 때문에(<code>년</code> = <code>ㄴ</code>+<code>ㅕ</code>+<code>ㄴ</code>),
 그대로 Excel·Windows에서 열면 한글이 자모 분리로 깨져 보입니다. 그래서 CSV에 쓰는 <b>파일명·경로·원본파일</b>만
@@ -249,10 +258,16 @@ NFC(조합형)로 정규화합니다 — <b>실제 파일 이름은 건드리지
 <table>
   <tr><th>파일 성격</th><th>대표 예시</th><th>권장 파서</th><th>이유 / 부작용</th></tr>
   <tr>
-    <td><b>텍스트·표가 많은 문서</b></td>
-    <td>보고서 Word(docx), 표·수치 위주 Excel(xlsx), 텍스트 위주 PDF</td>
+    <td><b>표·이미지 없는 순수 텍스트 문서</b></td>
+    <td>글 위주 PDF, 표 없는 보고서 Word(docx), 텍스트만 있는 슬라이드(pptx)</td>
+    <td><b>Default</b></td>
+    <td>내장 설정으로 텍스트만 빠르게 추출합니다. 세 파서 중 가장 가볍고 저렴하며, 표·이미지가 없으니 Docling까지 갈 필요가 없습니다.</td>
+  </tr>
+  <tr>
+    <td><b>표·수치가 많은 문서</b></td>
+    <td>표가 든 보고서 Word(docx), 표·수치 위주 Excel(xlsx), 표 있는 PDF</td>
     <td><b>Docling</b></td>
-    <td>문단·표·셀 구조를 그대로 살려 읽는 데 강합니다. 구조화 문서는 Docling이 가장 정확하고 저렴합니다.</td>
+    <td>문단·표·셀 구조를 그대로 살려 읽는 데 강합니다. 표가 있는 구조화 문서는 Docling이 가장 정확합니다.</td>
   </tr>
   <tr>
     <td><b>이미지가 많은 문서</b></td>
@@ -283,12 +298,14 @@ NFC(조합형)로 정규화합니다 — <b>실제 파일 이름은 건드리지
 <h3>판정에 쓰는 기준값 (프로그램 실제 설정)</h3>
 <table>
   <tr><th>형식</th><th>이 조건이면</th><th>→ 파서</th></tr>
-  <tr><td rowspan="4">PDF</td><td>벡터 드로잉 과밀 — 표본 페이지의 <b>30%↑</b>가 벡터 연산 <code>300</code> 초과</td><td>LLM&nbsp;Parser</td></tr>
+  <tr><td rowspan="5">PDF</td><td>벡터 드로잉 과밀 — 표본 페이지의 <b>30%↑</b>가 벡터 연산 <code>300</code> 초과</td><td>LLM&nbsp;Parser</td></tr>
   <tr><td>벡터 <b>15%↑</b> 또는 텍스트 과밀(문자 <code>900</code> 초과 페이지가 <b>40%↑</b>)</td><td>LLM&nbsp;Parser</td></tr>
   <tr><td>텍스트·이미지 거의 없음(페이지당 문자 <code>50</code> 미만 &amp; 이미지 <code>0.3</code> 미만)</td><td>검토</td></tr>
-  <tr><td>그 외 (이미지·텍스트 기반, 과밀 낮음)</td><td>Docling</td></tr>
-  <tr><td rowspan="2">Word(docx)<br>PPT(pptx)</td><td>본문 텍스트 <code>200</code>자 미만 + 이미지/차트 존재 → 이미지·캡처 위주</td><td>LLM&nbsp;Parser</td></tr>
-  <tr><td>텍스트 <code>200</code>자 이상 (텍스트 기반 문서)</td><td>Docling</td></tr>
+  <tr><td>이미지 거의 없는 순수 텍스트(페이지당 이미지 <code>0.15</code> 미만)</td><td>Default</td></tr>
+  <tr><td>그 외 (이미지 섞인 텍스트 기반, 과밀 낮음)</td><td>Docling</td></tr>
+  <tr><td rowspan="3">Word(docx)<br>PPT(pptx)</td><td>본문 텍스트 <code>200</code>자 미만 + 이미지/차트 존재 → 이미지·캡처 위주</td><td>LLM&nbsp;Parser</td></tr>
+  <tr><td>텍스트 <code>200</code>자 이상 + 표(<code>&lt;w:tbl&gt;</code>/<code>&lt;a:tbl&gt;</code>)·차트·이미지 존재</td><td>Docling</td></tr>
+  <tr><td>텍스트 <code>200</code>자 이상 + 표·차트·이미지 전무</td><td>Default</td></tr>
   <tr><td>Excel(xlsx)</td><td>표·수치·차트가 있으면 (빈 통합문서가 아니면)</td><td>Docling</td></tr>
 </table>
 <p class="muted">※ PDF는 파일 전체가 아니라 <b>앞뒤 표본 페이지(최대 40장)</b>만 검사해 빠르게 판정합니다.

@@ -1,7 +1,9 @@
 # salesforce_triage-docs
 
 로컬 문서(PDF · Word · PPT · Excel)를 **Salesforce Data 360에 업로드하기 전에** 사전 트리아지(triage)하는 CLI 도구입니다.
-각 파일에 어떤 파서(**Docling** / **LLM Parser** / **검토**)가 알맞은지 판정하고, 중복·손상·대용량을 가려내 **단일 CSV 한 장**으로 정리합니다. 선택적으로 판정 결과대로 파일을 폴더 분류(이동)까지 해 줍니다.
+각 파일에 어떤 파서(**Default** / **Docling** / **LLM Parser** / **검토**)가 알맞은지 판정하고, 중복·손상·대용량을 가려내 **단일 CSV 한 장**으로 정리합니다. 선택적으로 판정 결과대로 파일을 폴더 분류(이동)까지 해 줍니다.
+
+> 파서 3종은 Data 360 Search Index Builder의 **Parsing** 단계 선택지와 1:1로 대응합니다 — **Default**("Extract text with built-in settings", 텍스트만), **Docling**("Extracts text and tables", 텍스트+표), **LLM-based**("Extract text, images, and visual elements", 이미지·시각요소).
 
 파싱 비용과 품질은 파서 선택에 크게 좌우됩니다. 이 도구는 업로드 전에 "무엇을 어떤 파서로 넣을지"를 미리 걸러, 잘못된 파서로 인한 파싱 실패·비용 낭비를 줄이는 것이 목적입니다.
 
@@ -11,7 +13,8 @@
 
 | 파일 성격 | 권장 파서 | 이유 / 부작용 |
 |---|---|---|
-| 텍스트·표가 많은 문서 (보고서 Word, 표·수치 Excel, 텍스트 PDF) | **Docling** | 문단·표·셀 구조를 살려 읽기에 강함 |
+| 표·이미지 없는 순수 텍스트 문서 (글 위주 PDF·Word·PPT) | **Default** | 내장 설정으로 텍스트만 빠르게 추출 — 가장 가볍고 저비용 |
+| 표·수치가 많은 문서 (보고서 Word, 표·수치 Excel, 표 있는 PDF) | **Docling** | 문단·표·셀 구조를 살려 읽기에 강함 |
 | 이미지가 많은 문서 (사진·캡처 슬라이드, 이미지형 PDF) | **LLM Parser** | Docling은 이미지를 텍스트로 못 풀어 내용 누락 |
 | 차트가 이미지가 아니라 **벡터/텍스트**로 그려진 문서 | **LLM Parser** | ⚠️ Docling은 벡터 차트를 선·좌표 조각으로 파편화해 표/수치가 깨짐 |
 | 내용 거의 없음 / 스캔본 | **검토** | 사람 확인·OCR 필요 |
@@ -98,14 +101,16 @@ python3 triage_docs.py ~/Downloads --csv ~/Downloads/out.xlsx   # .xlsx 경로�
 | 벡터 드로잉 과밀 — 표본의 **30%↑** 페이지가 벡터 연산 300 초과 | LLM Parser |
 | 벡터 **15%↑** 또는 텍스트 과밀(문자 900 초과 페이지가 **40%↑**) | LLM Parser |
 | 텍스트·이미지 거의 없음 (페이지당 문자 50 미만 & 이미지 0.3 미만) | 검토 |
-| 그 외 (이미지·텍스트 기반, 과밀 낮음) | Docling |
+| 이미지 거의 없는 순수 텍스트 (페이지당 이미지 **0.15 미만**) | **Default** |
+| 그 외 (이미지 섞인 텍스트 기반, 과밀 낮음) | Docling |
 
-### Office (docx / pptx / xlsx) — ZIP 내부 text/media/chart 카운트
+### Office (docx / pptx / xlsx) — ZIP 내부 text/table/media/chart 카운트
 
 | 조건 | → 파서 |
 |---|---|
 | Word/PPT: 본문 텍스트 200자 미만 + 이미지/차트 존재 | LLM Parser |
-| Word/PPT: 텍스트 200자 이상 | Docling |
+| Word/PPT: 텍스트 200자 이상 + **표(`<w:tbl>`/`<a:tbl>`)·차트·이미지 존재** | Docling |
+| Word/PPT: 텍스트 200자 이상 + **표·차트·이미지 전무** | **Default** |
 | Excel: 표·수치·차트가 있으면 (빈 통합문서가 아니면) | Docling |
 | 내용 거의 없음 (빈 파일 의심) | 검토 |
 
@@ -126,7 +131,7 @@ python3 triage_docs.py ~/Downloads --csv ~/Downloads/out.xlsx   # .xlsx 경로�
 | 번호 | 정렬 후 매긴 순번 |
 | 파일명 / 경로 | 파일 이름과 전체 경로(`--move` 후에는 옮겨진 경로). 한글은 Excel에서 깨지지 않도록 NFC로 정규화 |
 | 형식 | pdf · docx · pptx · xlsx · doc … |
-| 권장_파싱방식 | LLM Parser · Docling · 검토 |
+| 권장_파싱방식 | Default · Docling · LLM Parser · 검토 |
 | 이유 | 판정 근거(단서 수치 포함) |
 | 용량 | 1GB 이상은 GB, 그 외 MB (예: `73.9MB`, `2.31GB`) |
 | 용량_상태 | `업로드불가`(2GB↑) / `대용량`(경고선↑) / 빈칸 |
@@ -136,7 +141,7 @@ python3 triage_docs.py ~/Downloads --csv ~/Downloads/out.xlsx   # .xlsx 경로�
 | 중복여부 / 원본파일 | 원본·중복·고유 / 같은 내용인 원본 파일명 |
 | 정상여부 | 정상 / 손상(원인) / **암호화**(원인) |
 
-정렬 순서: 손상 → LLM Parser → 검토 → Docling, 그 안에서는 이름순.
+정렬 순서: 손상 → LLM Parser → 검토 → Docling → Default, 그 안에서는 이름순.
 
 ---
 
@@ -150,7 +155,7 @@ python3 triage_docs.py ~/Downloads --csv ~/Downloads/out.xlsx   # .xlsx 경로�
 | 2 | 중복 | `_duplicates` |
 | 3 | 업로드불가(2GB↑) | `_oversize` |
 | 4 | 대용량(75 MB↑) | `_large` |
-| 5 | 그 외 원본·고유 | `LLM_Parser` · `Docling` · `검토` |
+| 5 | 그 외 원본·고유 | `LLM_Parser` · `Docling` · `Default` · `검토` |
 
 - 중복은 **SHA-256 내용 해시**로 판정합니다(파일명이 아니라 내용 기준).
 - **2GB 초과**는 Uploader가 업로드 자체를 거부하므로 최우선으로 `_oversize`로 분리합니다 — 분할·변환이 필수입니다.
