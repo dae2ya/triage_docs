@@ -40,9 +40,15 @@ Office (구조가 명확 → 사실 기반):
 사용법:
   python3 triage_docs.py <파일_또는_폴더> [...] [--csv 결과.csv] [--jobs 8] [--recursive]
   python3 triage_docs.py ~/docs --csv ~/Downloads/triage.csv
-  (--csv 생략 시 콘솔 요약만)
+  python3 triage_docs.py ~/docs --xlsx            # 엑셀(요약+상세 2시트)로 저장
+  python3 triage_docs.py ~/docs --csv 결과.xlsx    # 확장자가 .xlsx면 자동으로 엑셀
 
-CSV 필드: 번호, 파일명, 경로, 형식, 권장_파싱방식, 이유, 용량, 용량_상태, 용량_추천,
+출력:
+  기본은 상세 표 한 장(CSV). --xlsx(또는 .xlsx 경로)면 '요약'·'상세' 두 시트의 엑셀 —
+  요약 시트에는 콘솔에 찍히는 유형별 분포·파서별 집계·대용량/손상 목록이 그대로 담긴다.
+  엑셀 생성은 외부 라이브러리 없이 표준 라이브러리(zipfile)만으로 처리한다.
+
+상세 필드: 번호, 파일명, 경로, 형식, 권장_파싱방식, 이유, 용량, 용량_상태, 용량_추천,
           변환대상, 이름검사, 중복여부, 원본파일, 정상여부
 """
 import sys, os, glob, csv, argparse, re, hashlib, zipfile, shutil, unicodedata
@@ -433,26 +439,124 @@ def size_recommendation(r):
 
 
 CSV_NAME = "Triage 결과.csv"
+XLSX_NAME = "Triage 결과.xlsx"
 
 
-def resolve_csv_path(csv_arg, paths, out_root=None):
-    """CSV 저장 경로 결정. (파일명은 CSV_NAME)
-      - csv_arg가 .csv 파일명 → 그 경로 그대로 사용 (최우선)
-      - csv_arg가 폴더        → 그 폴더에 생성
+def resolve_out_path(csv_arg, paths, out_root=None, want_xlsx=False):
+    """결과 파일 저장 경로 결정. (기본 파일명은 CSV_NAME / XLSX_NAME)
+      - csv_arg가 .csv/.xlsx 파일명 → 그 경로 그대로 사용 (최우선)
+      - csv_arg가 폴더             → 그 폴더에 생성
       - out_root(--move 목적지)가 있으면 → 그 폴더 바로 밑에 생성
-      - 그 외                  → 첫 스캔 폴더(또는 첫 파일의 폴더)에 생성
+      - 그 외                       → 첫 스캔 폴더(또는 첫 파일의 폴더)에 생성
     """
+    default_name = XLSX_NAME if want_xlsx else CSV_NAME
     if csv_arg:
         p = os.path.abspath(os.path.expanduser(csv_arg))
         if os.path.isdir(p) or csv_arg.endswith(os.sep):
-            return os.path.join(p, CSV_NAME)
+            return os.path.join(p, default_name)
         return p
     if out_root:
-        return os.path.join(out_root, CSV_NAME)
+        return os.path.join(out_root, default_name)
     # 미지정: 첫 스캔 대상의 폴더
     first = os.path.abspath(os.path.expanduser(paths[0]))
     folder = first if os.path.isdir(first) else os.path.dirname(first)
-    return os.path.join(folder, CSV_NAME)
+    return os.path.join(folder, default_name)
+
+
+# ============================== XLSX (stdlib) ================================
+# openpyxl 등 외부 의존성 없이 zipfile+XML로 최소 스펙 .xlsx를 직접 생성.
+# 이 도구는 이미 Office=ZIP+XML을 읽고 있으므로, 쓰는 쪽도 표준 라이브러리로 해결한다.
+# 지원: 여러 시트, 헤더 굵게(1행), 문자열/숫자 자동 구분. (서식은 최소한만)
+def _xl_col(idx):
+    """0-based 열 인덱스 → 엑셀 열 문자(A, B, ..., Z, AA...)."""
+    s = ""
+    idx += 1
+    while idx:
+        idx, rem = divmod(idx - 1, 26)
+        s = chr(65 + rem) + s
+    return s
+
+
+def _xl_esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _sheet_xml(rows):
+    """2차원 리스트(rows) → worksheet XML. 1행은 헤더(style s=1: 굵게).
+    각 셀: 숫자(int/float)면 <c t=n>, 그 외 문자열은 inlineStr로 기록."""
+    out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+           '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>']
+    for r_i, row in enumerate(rows, 1):
+        out.append(f'<row r="{r_i}">')
+        for c_i, val in enumerate(row):
+            ref = f"{_xl_col(c_i)}{r_i}"
+            style = ' s="1"' if r_i == 1 else ""
+            if isinstance(val, bool):
+                val = str(val)
+            if isinstance(val, (int, float)):
+                out.append(f'<c r="{ref}"{style}><v>{val}</v></c>')
+            else:
+                txt = _xl_esc("" if val is None else val)
+                out.append(f'<c r="{ref}"{style} t="inlineStr"><is><t xml:space="preserve">{txt}</t></is></c>')
+        out.append('</row>')
+    out.append('</sheetData></worksheet>')
+    return "".join(out)
+
+
+def write_xlsx(path, sheets):
+    """sheets = [(시트이름, [[행]...]), ...] 를 하나의 .xlsx로 저장.
+    NFC 정규화는 호출측에서 끝내고 넘긴다고 가정."""
+    n = len(sheets)
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                  for i in range(1, n + 1))
+        + '</Types>')
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        '</Relationships>')
+    wb_sheets = "".join(
+        f'<sheet name="{_xl_esc(name)[:31]}" sheetId="{i}" r:id="rId{i}"/>'
+        for i, (name, _) in enumerate(sheets, 1))
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets>{wb_sheets}</sheets></workbook>')
+    wb_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + "".join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>'
+                  for i in range(1, n + 1))
+        + f'<Relationship Id="rId{n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        + '</Relationships>')
+    # styles.xml: 폰트 2개(일반 / 굵게), cellXfs 2개(s=0 일반, s=1 굵게)
+    styles = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+        '<borders count="1"><border/></borders>'
+        '<cellStyleXfs count="1"><xf/></cellStyleXfs>'
+        '<cellXfs count="2"><xf fontId="0"/><xf fontId="1" applyFont="1"/></cellXfs>'
+        '</styleSheet>')
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", root_rels)
+        z.writestr("xl/workbook.xml", workbook)
+        z.writestr("xl/_rels/workbook.xml.rels", wb_rels)
+        z.writestr("xl/styles.xml", styles)
+        for i, (_, rows) in enumerate(sheets, 1):
+            z.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows))
 
 
 def main():
@@ -471,6 +575,9 @@ def main():
     ap.add_argument("--large-mb", type=float, default=LARGE_BYTES / (1024 * 1024),
                     help=f"대용량 경고 임계값(MB). 기본 {LARGE_BYTES // (1024*1024)}MB 초과 시 축소 권장/_large 분리. "
                          "2GB 초과 업로드불가 기준은 고정")
+    ap.add_argument("--xlsx", action="store_true",
+                    help="결과를 CSV 대신 엑셀(.xlsx)로 저장 — '요약' 시트(유형별 분포·집계·대용량/손상 목록) + "
+                         "'상세' 시트 2장. --csv 값이 .xlsx로 끝나면 자동으로 켜짐 (외부 라이브러리 불필요)")
     a = ap.parse_args()
     LARGE_BYTES = int(a.large_mb * 1024 * 1024)
 
@@ -574,27 +681,68 @@ def main():
             hint = " (이미지 다수 추정 → 이미지 축소)" if r.get("img_signal") else ""
             print(f"  {human_size(r['size']):>9}  {r['name']}{hint}")
 
-    # 이동 (CSV보다 먼저 → CSV에 이동 후 경로가 기록되도록)
+    # 이동 (파일 저장보다 먼저 → 결과에 이동 후 경로가 기록되도록)
     if a.move:
         move_files(rows, out_root)
 
-    csv_path = resolve_csv_path(a.csv, a.paths, out_root if a.move else None)
-    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
     # macOS 파일 시스템은 파일명을 NFD(분해형)로 저장 → Excel/Windows에서 한글이 자모 분리로 깨져 보임.
-    # CSV에 쓰는 텍스트 필드만 NFC(조합형)로 정규화 (실제 파일은 건드리지 않음).
+    # 결과에 쓰는 텍스트 필드만 NFC(조합형)로 정규화 (실제 파일은 건드리지 않음).
     def nfc(s):
         return unicodedata.normalize("NFC", s) if isinstance(s, str) else s
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["번호", "파일명", "경로", "형식", "권장_파싱방식", "이유",
-                    "용량", "용량_상태", "용량_추천", "변환대상", "이름검사",
-                    "중복여부", "원본파일", "정상여부"])
-        for n, r in enumerate(rows, 1):
-            w.writerow([n, nfc(r["name"]), nfc(r["file"]), r.get("ext", ""), r.get("parser", "-"),
-                        r.get("why", "-"), human_size(r.get("size", 0)), size_bucket(r),
-                        size_recommendation(r), r.get("convert", ""), nfc(r.get("name_issue", "")),
-                        r.get("dup", "-"), nfc(r.get("origin", "")), r.get("reason", "-")])
-    print(f"CSV 저장: {csv_path}")
+
+    header = ["번호", "파일명", "경로", "형식", "권장_파싱방식", "이유",
+              "용량", "용량_상태", "용량_추천", "변환대상", "이름검사",
+              "중복여부", "원본파일", "정상여부"]
+    detail_rows = [[n, nfc(r["name"]), nfc(r["file"]), r.get("ext", ""), r.get("parser", "-"),
+                    r.get("why", "-"), human_size(r.get("size", 0)), size_bucket(r),
+                    size_recommendation(r), r.get("convert", ""), nfc(r.get("name_issue", "")),
+                    r.get("dup", "-"), nfc(r.get("origin", "")), r.get("reason", "-")]
+                   for n, r in enumerate(rows, 1)]
+
+    want_xlsx = a.xlsx or (bool(a.csv) and a.csv.lower().endswith(".xlsx"))
+    out_path = resolve_out_path(a.csv, a.paths, out_root if a.move else None, want_xlsx)
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    if want_xlsx:
+        # ---- '요약' 시트: 콘솔에 찍히던 요약을 그대로 표로 (섹션별 소제목 + 데이터) ----
+        s = [["Data 360 업로드 사전점검 요약"], [],
+             ["항목", "값"],
+             ["총 파일 수", len(rows)],
+             ["LLM Parser", nLLM], ["Docling", nDoc], ["검토", nRev],
+             ["손상", nBad], ["  └ 암호화", nEnc],
+             ["중복", nDup],
+             ["파일명 검사 위반", nName], ["변환 대상", nConv],
+             ["업로드 불가(>2GB)", len(over)], [f"대용량(>{human_size(LARGE_BYTES)})", len(large)],
+             [],
+             ["유형별 분포"], ["형식", "개수", "총용량"]]
+        for e in sorted(dist, key=lambda k: dist[k][1], reverse=True):
+            c, sz = dist[e]
+            s.append([e, c, human_size(sz)])
+        if over:
+            s += [[], ["⛔ 업로드 불가 (>2GB, 분할/변환 필수)"], ["용량", "파일명"]]
+            s += [[human_size(r["size"]), nfc(r["name"])] for r in over]
+        if large:
+            s += [[], [f"⚠ 대용량 (>{human_size(LARGE_BYTES)}, 축소 권장)"], ["용량", "파일명"]]
+            s += [[human_size(r["size"]), nfc(r["name"])
+                   + (" (이미지 다수 추정)" if r.get("img_signal") else "")] for r in large]
+        bad_rows = [r for r in rows if not r.get("ok")]
+        if bad_rows:
+            s += [[], ["손상 · 암호화 · 미지원"], ["파일명", "사유"]]
+            s += [[nfc(r["name"]), r.get("reason", "-")] for r in bad_rows]
+        name_bad = [r for r in rows if r.get("name_issue")]
+        if name_bad:
+            s += [[], ["파일명 검사 위반"], ["파일명", "사유"]]
+            s += [[nfc(r["name"]), nfc(r["name_issue"])] for r in name_bad]
+
+        write_xlsx(out_path, [("요약", s), ("상세", [header] + detail_rows)])
+        print(f"XLSX 저장: {out_path}  (시트: 요약 / 상세)")
+    else:
+        with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(header)
+            for row in detail_rows:
+                w.writerow(row)
+        print(f"CSV 저장: {out_path}")
 
 
 if __name__ == "__main__":

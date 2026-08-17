@@ -66,6 +66,10 @@ python3 triage_docs.py ~/Downloads --recursive --move --dest ~/Downloads/분류�
 
 # 파일·폴더 여러 개 + CSV 이름 지정
 python3 triage_docs.py a.pdf ~/docs b.pptx --csv ~/Downloads/out.csv
+
+# 엑셀(요약 + 상세 2시트)로 저장 — 콘솔 요약이 '요약' 시트에 그대로 담김
+python3 triage_docs.py ~/Downloads --xlsx
+python3 triage_docs.py ~/Downloads --csv ~/Downloads/out.xlsx   # .xlsx 경로면 자동으로 엑셀
 ```
 
 **권장 순서:** 먼저 `--move` 없이 돌려 `Triage 결과.csv`로 결과를 확인하고, 분류가 맞으면 `--move`를 붙여 실제로 정리하세요.
@@ -75,7 +79,8 @@ python3 triage_docs.py a.pdf ~/docs b.pptx --csv ~/Downloads/out.csv
 | 옵션 | 설명 |
 |---|---|
 | `paths` | 파일 또는 폴더 (여러 개 가능) |
-| `--csv <경로>` | 결과 CSV의 저장 위치/이름. 폴더면 그 안에 `Triage 결과.csv` 생성. 생략 시 `--move` 목적지 밑에, 이동이 없으면 스캔 폴더에 저장 (Excel용 UTF-8 BOM) |
+| `--csv <경로>` | 결과 파일의 저장 위치/이름. 폴더면 그 안에 `Triage 결과.csv`(또는 `--xlsx`면 `.xlsx`) 생성. 경로가 `.xlsx`로 끝나면 자동으로 엑셀. 생략 시 `--move` 목적지 밑에, 이동이 없으면 스캔 폴더에 저장 (CSV는 Excel용 UTF-8 BOM) |
+| `--xlsx` | CSV 대신 엑셀(`.xlsx`)로 저장. **`요약` 시트**(유형별 분포·파서별 집계·업로드불가/대용량/손상 목록 = 콘솔 요약 그대로) + **`상세` 시트**(파일별 판정 표) 2장. 외부 라이브러리 없이 표준 라이브러리로 생성 |
 | `--move` | 판정 결과대로 파일을 하위 폴더로 이동 |
 | `--dest <경로>` | `--move` 시 이동 목적지 루트 (기본: `~/Downloads/_triage`) |
 | `--recursive` | 하위 폴더까지 재귀 탐색 |
@@ -108,7 +113,13 @@ python3 triage_docs.py a.pdf ~/docs b.pptx --csv ~/Downloads/out.csv
 
 ---
 
-## 출력 CSV 필드
+## 출력 필드
+
+기본 출력은 아래 컬럼을 가진 **상세 표 한 장(CSV)** 입니다. `--xlsx`(또는 `.xlsx` 경로)를 주면
+같은 상세 표가 `상세` 시트에 들어가고, 그 앞에 `요약` 시트가 한 장 더 붙습니다 — 유형별 분포,
+파서별 집계, 업로드불가·대용량·손상·파일명 위반 목록(= 콘솔에 찍히던 요약)이 그대로 표로 담깁니다.
+
+### 상세 시트 / CSV 컬럼
 
 | 컬럼 | 내용 |
 |---|---|

@@ -84,8 +84,9 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
 <h3>옵션</h3>
 <table>
   <tr><th>옵션</th><th>설명</th></tr>
-  <tr><td><code>--csv &lt;경로&gt;</code></td><td>결과 CSV의 저장 위치입니다(Excel에서 한글이 깨지지 않는 UTF-8 BOM). 생략하면 <code>--move</code> 목적지(<code>_triage</code>) 바로 밑에, 이동이 없으면 스캔한 폴더에 <code>Triage 결과.csv</code>로 저장합니다.</td></tr>
-  <tr><td><code>--move</code></td><td>판정 결과대로 파일을 하위 폴더로 <b>이동</b>합니다(4·6절 참고). 지정하지 않으면 파일은 그대로 두고 CSV만 만듭니다.</td></tr>
+  <tr><td><code>--csv &lt;경로&gt;</code></td><td>결과 파일의 저장 위치입니다(CSV는 Excel에서 한글이 깨지지 않는 UTF-8 BOM). 경로가 <code>.xlsx</code>로 끝나면 자동으로 엑셀로 저장합니다. 생략하면 <code>--move</code> 목적지(<code>_triage</code>) 바로 밑에, 이동이 없으면 스캔한 폴더에 <code>Triage 결과.csv</code>(또는 <code>--xlsx</code>면 <code>.xlsx</code>)로 저장합니다.</td></tr>
+  <tr><td><code>--xlsx</code></td><td>CSV 대신 <b>엑셀(<code>.xlsx</code>)</b>로 저장합니다. <b><code>요약</code> 시트</b>(유형별 분포·파서별 집계·업로드불가/대용량/손상/파일명 위반 목록 = 콘솔에 찍히는 요약 그대로)와 <b><code>상세</code> 시트</b>(파일별 판정 표) 두 장이 만들어집니다. <span class="muted">외부 라이브러리 없이 표준 라이브러리만으로 생성하므로 별도 설치가 필요 없습니다.</span></td></tr>
+  <tr><td><code>--move</code></td><td>판정 결과대로 파일을 하위 폴더로 <b>이동</b>합니다(4·6절 참고). 지정하지 않으면 파일은 그대로 두고 결과 파일만 만듭니다.</td></tr>
   <tr><td><code>--dest &lt;폴더&gt;</code></td><td><code>--move</code>로 옮길 목적지 폴더입니다(기본값 <code>~/Downloads/_triage</code>).</td></tr>
   <tr><td><code>--large-mb &lt;MB&gt;</code></td><td>대용량 경고선(MB)입니다. 기본값 75. 넘으면 <code>_large</code>로 분리하고 축소를 권합니다. <span class="muted">2&nbsp;GB 업로드불가 기준은 고정이라 이 값과 무관합니다.</span></td></tr>
   <tr><td><code>--jobs &lt;N&gt;</code></td><td>동시에 돌릴 프로세스 수입니다(기본값은 CPU 코어 −1). 병렬이 막힌 환경이면 자동으로 하나씩 처리합니다.</td></tr>
@@ -107,6 +108,8 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
       <td><pre><code>python3 triage_docs.py ~/Downloads --recursive --move --dest ~/Downloads/분류결과</code></pre></td></tr>
   <tr><td>파일·폴더 여러 개 + CSV 이름 지정</td>
       <td><pre><code>python3 triage_docs.py a.pdf ~/docs b.pptx --csv ~/Downloads/out.csv</code></pre></td></tr>
+  <tr><td>엑셀(요약 + 상세 2시트)로 저장<br><span class="muted">(콘솔 요약이 <code>요약</code> 시트에 그대로)</span></td>
+      <td><pre><code>python3 triage_docs.py ~/Downloads --xlsx</code></pre></td></tr>
 </table>
 <p class="note"><b>권장 순서:</b> 먼저 <code>--move</code> 없이 돌려 <code>Triage 결과.csv</code>로 결과를 확인하고,
 분류가 맞으면 <code>--move</code>를 붙여 실제로 정리하세요. 대용량 파일은 <code>_large</code>로 따로 빠지니,
@@ -214,9 +217,12 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
     <span class="muted">※ macOS의 NFD 자모분리 자체는 위반으로 보지 않습니다(NFC 정규화로 표시만 정상화).</span></li>
 </ul>
 
-<h2>7. 출력 CSV 필드</h2>
+<h2>7. 출력 필드</h2>
+<p>기본 출력은 아래 컬럼을 가진 <b>상세 표 한 장(CSV)</b>입니다. <code>--xlsx</code>(또는 <code>.xlsx</code> 경로)를 주면
+같은 상세 표가 <code>상세</code> 시트에 들어가고, 그 앞에 <code>요약</code> 시트가 한 장 더 붙습니다 —
+유형별 분포, 파서별 집계, 업로드불가·대용량·손상·파일명 위반 목록(화면 아래에 찍히는 요약)이 그대로 표로 담깁니다.</p>
 <table>
-  <tr><th>컬럼</th><th>내용</th></tr>
+  <tr><th>컬럼 (상세 시트 / CSV)</th><th>내용</th></tr>
   <tr><td>번호</td><td>정렬한 뒤 매긴 순번</td></tr>
   <tr><td>파일명 / 경로</td><td>파일 이름과 전체 경로(<code>--move</code> 후에는 옮겨진 경로). <span class="muted">한글 이름은 Excel에서 깨지지 않도록 NFC(조합형)로 정규화해 적습니다.</span></td></tr>
   <tr><td>형식</td><td>pdf · docx · pptx · xlsx · doc …</td></tr>
