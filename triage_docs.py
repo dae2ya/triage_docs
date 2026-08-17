@@ -42,7 +42,8 @@ Office (구조가 명확 → 사실 기반):
   python3 triage_docs.py ~/docs --csv ~/Downloads/triage.csv
   (--csv 생략 시 콘솔 요약만)
 
-CSV 필드: 번호, 파일명, 경로, 형식, 권장_파싱방식, 이유, 중복여부, 원본파일, 정상여부
+CSV 필드: 번호, 파일명, 경로, 형식, 권장_파싱방식, 이유, 용량, 용량_상태, 용량_추천,
+          변환대상, 이름검사, 중복여부, 원본파일, 정상여부
 """
 import sys, os, glob, csv, argparse, re, hashlib, zipfile, shutil, unicodedata
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -57,9 +58,15 @@ HEAVY = 900           # PDF: 이 문자수 초과 = "텍스트 과밀" 페이지
 VEC_HEAVY = 300       # PDF: 페이지 path 연산자 이 수 초과 = "벡터 과밀"
 SAMPLE_PAGES = 40     # PDF: 페이지 많으면 앞뒤 표본만 검사 (속도)
 OFFICE_TEXT_MIN = 200 # Office: 이 문자수 미만이면 "텍스트 실질 없음"으로 간주
-LARGE_BYTES = 20 * 1024 * 1024  # 이 크기 초과면 "대용량"으로 표시 (Data 360 업로드/파싱 부담)
+LARGE_BYTES = 75 * 1024 * 1024        # 경고선: 이 크기 초과면 "대용량"(파싱/임베딩 부담) — 축소 권장
+OVERSIZE_BYTES = 2 * 1024 * 1024 * 1024  # 하드 한계: Market Insight Uploader 2GB/file → 이 초과면 "업로드 불가"
 HASH_CHUNK = 1 << 20  # 해시 읽기 블록 (1MB)
 VEC_OP = re.compile(rb'(?:^|\s)(?:m|l|c|v|y|re|f|F|f\*|B|B\*|b|b\*|S|s|W|W\*)(?=\s)')
+
+# 파일명/경로 유효성 (데이터 마이그레이션 중 저장 실패 예방)
+NAME_MAX_LEN = 120   # 파일명(확장자 포함) 이 길이 이상이면 경고
+PATH_MAX_LEN = 255   # 전체 경로 이 길이 이상이면 경고
+BAD_NAME_CHARS = re.compile(r'[\\/:*?"<>|]|[\x00-\x1f]')  # 윈도우/시스템 금지문자 + 제어문자
 
 EXT_PDF   = {".pdf"}
 EXT_OOXML = {".docx", ".pptx", ".xlsx"}
@@ -74,6 +81,21 @@ def file_sha256(path):
         for blk in iter(lambda: f.read(HASH_CHUNK), b""):
             h.update(blk)
     return h.hexdigest()
+
+
+def check_filename(name, full_path):
+    """파일명/경로 유효성 검사. 위반 사유를 '; '로 이어 반환 (없으면 "").
+    데이터 마이그레이션 중 저장 실패를 예방하기 위한 사전 경고 — 실제 파일은 건드리지 않음."""
+    issues = []
+    if len(name) >= NAME_MAX_LEN:
+        issues.append(f"이름 {NAME_MAX_LEN}자 이상({len(name)})")
+    bad = BAD_NAME_CHARS.findall(name)
+    if bad:
+        shown = "".join(sorted(set(c for c in bad if c.isprintable())))
+        issues.append("특수문자 포함" + (f"({shown})" if shown else "(제어문자)"))
+    if len(full_path) >= PATH_MAX_LEN:
+        issues.append(f"경로 {PATH_MAX_LEN}자 이상({len(full_path)})")
+    return "; ".join(issues)
 
 
 # ============================== PDF ==========================================
@@ -123,6 +145,16 @@ def analyze_pdf(path, out):
         return out
     try:
         r = PdfReader(path)
+        # 암호화(비밀번호) PDF는 손상과 구분해 명시 (No.4). 빈 비번이면 열어보고 넘어감.
+        if getattr(r, "is_encrypted", False):
+            try:
+                opened = r.decrypt("")  # pypdf: 0=실패, 1/2=성공
+            except Exception:
+                opened = 0
+            if not opened:
+                out.update({"ok": False, "reason": "암호화(비밀번호) — 해제 후 업로드",
+                            "parser": "검토", "why": "-"})
+                return out
         pages = len(r.pages)
     except Exception as e:
         out.update({"ok": False, "reason": f"PDF 파싱 실패: {e}", "parser": "-", "why": "-"})
@@ -177,7 +209,16 @@ def analyze_office(path, ext, out):
         zf = zipfile.ZipFile(path)
         names = zf.namelist()
     except Exception as e:
-        out.update({"ok": False, "reason": f"OOXML(zip) 열기 실패: {e}", "parser": "-", "why": "-"})
+        # 암호화된 OOXML은 ZIP이 아니라 OLE 컨테이너(D0 CF 11 E0)로 감싸짐 → 손상과 구분 (No.4).
+        try:
+            with open(path, "rb") as fh:
+                magic = fh.read(8)
+        except Exception:
+            magic = b""
+        if magic.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            out.update({"ok": False, "reason": "암호화 추정 — 해제 후 업로드", "parser": "검토", "why": "-"})
+        else:
+            out.update({"ok": False, "reason": f"OOXML(zip) 열기 실패: {e}", "parser": "-", "why": "-"})
         return out
 
     prefix = {"docx": "word", "pptx": "ppt", "xlsx": "xl"}[ext[1:]]
@@ -245,7 +286,10 @@ def analyze_office(path, ext, out):
 def analyze(path):
     """확장자로 분기. 해시는 항상 계산(중복판정용)."""
     ext = os.path.splitext(path)[1].lower()
-    out = {"file": path, "name": os.path.basename(path), "ext": ext.lstrip(".")}
+    name = os.path.basename(path)
+    # 파일명 유효성은 형식과 무관하게 항상 검사 (No.5). convert는 기본 "" (No.6).
+    out = {"file": path, "name": name, "ext": ext.lstrip("."),
+           "name_issue": check_filename(name, path), "convert": ""}
     try:
         out["size"] = os.path.getsize(path)
     except OSError:
@@ -262,8 +306,10 @@ def analyze(path):
     if ext in EXT_OOXML:
         return analyze_office(path, ext, out)
     if ext in EXT_LEGACY:
+        # 구형 바이너리는 직접 텍스트 추출이 까다로워 PDF/최신 포맷 변환 대상 (No.6).
         out.update({"ok": True, "reason": "정상(구형 바이너리)",
                     "parser": "검토",
+                    "convert": "변환 권장(구형 포맷 → PDF 또는 .docx/.pptx/.xlsx)",
                     "why": "구형 포맷(.doc/.ppt/.xls) — 구조 분석 불가. .docx/.pptx/.xlsx로 변환 후 재판정 권장"})
         return out
     out.update({"ok": False, "reason": "미지원 형식", "parser": "-", "why": "-"})
@@ -305,6 +351,16 @@ def collect_docs(args, recursive=False, exclude_root=None):
 DEST_FOLDER = {"LLM Parser": "LLM_Parser", "Docling": "Docling", "검토": "검토"}
 
 
+def size_bucket(r):
+    """용량 상태 문자열: 2GB 초과='업로드불가', 경고선 초과='대용량', 그 외=''."""
+    sz = r.get("size", 0)
+    if sz > OVERSIZE_BYTES:
+        return "업로드불가"
+    if sz > LARGE_BYTES:
+        return "대용량"
+    return ""
+
+
 # ============================== 파일 이동 ====================================
 def _unique_dest(dst_dir, name):
     """목적지에 같은 이름이 있으면 ' (2)', ' (3)' … 붙여 충돌 방지."""
@@ -319,10 +375,11 @@ def _unique_dest(dst_dir, name):
 
 def move_files(rows, out_root):
     """판정 결과대로 파일을 하위 폴더로 이동.
-      - 손상/미지원 → _errors
-      - 중복         → _duplicates
-      - 대용량(>임계) → _large   (파싱 비용 절감용 별도 분리; 파서 폴더보다 우선)
-      - 그 외 원본/고유 → 권장_파싱방식 폴더 (LLM_Parser/Docling/검토)"""
+      - 손상/암호화/미지원 → _errors
+      - 중복              → _duplicates
+      - 업로드불가(2GB↑)   → _oversize (분할/변환 필수; 최우선 분리)
+      - 대용량(>경고선)    → _large    (파싱 비용 절감용 별도 분리; 파서 폴더보다 우선)
+      - 그 외 원본/고유    → 권장_파싱방식 폴더 (LLM_Parser/Docling/검토)"""
     moved, errs = 0, 0
     summary = {}
     for r in rows:
@@ -333,6 +390,8 @@ def move_files(rows, out_root):
             sub = "_errors"
         elif r.get("dup") == "중복":
             sub = "_duplicates"
+        elif r.get("size", 0) > OVERSIZE_BYTES:
+            sub = "_oversize"
         elif r.get("size", 0) > LARGE_BYTES:
             sub = "_large"
         else:  # 원본 또는 고유
@@ -354,14 +413,19 @@ def move_files(rows, out_root):
 
 
 def human_size(n):
-    """바이트 → MB 단위 문자열 (예: 104.8MB). 용량 표시는 MB로 통일."""
-    mb = float(n or 0) / (1024 * 1024)
-    return f"{mb:.1f}MB"
+    """바이트 → 사람이 읽는 용량 문자열 (1GB 이상은 GB, 그 외 MB)."""
+    b = float(n or 0)
+    if b >= 1024 ** 3:
+        return f"{b / 1024 ** 3:.2f}GB"
+    return f"{b / 1024 ** 2:.1f}MB"
 
 
 def size_recommendation(r):
-    """대용량이면 용량 축소 안내 문구, 아니면 빈 문자열."""
-    if r.get("size", 0) <= LARGE_BYTES:
+    """용량 상태별 안내 문구. 2GB 초과=업로드 불가, 경고선 초과=축소 권장, 그 외 빈 문자열."""
+    sz = r.get("size", 0)
+    if sz > OVERSIZE_BYTES:
+        return "2GB 초과 — Market Insight Uploader 업로드 불가. 분할/변환 필수"
+    if sz <= LARGE_BYTES:
         return ""
     if r.get("img_signal"):
         return "대용량(이미지 다수 추정) — 이미지 해상도↓/불필요 이미지 제거로 용량 축소 후 파싱 권장"
@@ -392,6 +456,7 @@ def resolve_csv_path(csv_arg, paths, out_root=None):
 
 
 def main():
+    global LARGE_BYTES  # --large-mb로 경고선 조절 (2GB 업로드불가 상한은 고정)
     ap = argparse.ArgumentParser(description="로컬 문서(PDF/Word/PPT/Excel) 대량 트리아지 → 단일 CSV")
     ap.add_argument("paths", nargs="+", help="파일 또는 폴더")
     ap.add_argument("--csv", help="결과 CSV 경로/폴더. 폴더면 그 안에 'Triage 결과.csv' 생성. "
@@ -403,7 +468,11 @@ def main():
                     help="판정 결과대로 파일을 폴더로 이동 (원본/고유→파서폴더, 중복→_duplicates, 손상→_errors)")
     ap.add_argument("--dest", default="~/Downloads/_triage",
                     help="--move 시 이동 목적지 루트 (기본: ~/Downloads/_triage)")
+    ap.add_argument("--large-mb", type=float, default=LARGE_BYTES / (1024 * 1024),
+                    help=f"대용량 경고 임계값(MB). 기본 {LARGE_BYTES // (1024*1024)}MB 초과 시 축소 권장/_large 분리. "
+                         "2GB 초과 업로드불가 기준은 고정")
     a = ap.parse_args()
+    LARGE_BYTES = int(a.large_mb * 1024 * 1024)
 
     out_root = os.path.abspath(os.path.expanduser(a.dest)) if a.move else None
     docs = collect_docs(a.paths, recursive=a.recursive, exclude_root=out_root)
@@ -463,18 +532,46 @@ def main():
     nLLM = sum(1 for r in rows if r.get("parser") == "LLM Parser")
     nDoc = sum(1 for r in rows if r.get("parser") == "Docling")
     nRev = sum(1 for r in rows if r.get("parser") == "검토")
+    nEnc = sum(1 for r in rows if "암호화" in (r.get("reason") or ""))
     nBad = sum(1 for r in rows if not r.get("ok"))
     nDup = sum(1 for r in rows if r.get("dup") == "중복")
-    print(f"\n결과: LLM Parser={nLLM}  Docling={nDoc}  검토={nRev}  손상={nBad}  |  중복={nDup}")
+    print(f"\n결과: LLM Parser={nLLM}  Docling={nDoc}  검토={nRev}  손상={nBad}(암호화 {nEnc})  |  중복={nDup}")
 
-    large = sorted((r for r in rows if r.get("size", 0) > LARGE_BYTES
+    # 유형별 개수·용량 분포 (No.1) — 확장자별 누적
+    dist = {}
+    for r in rows:
+        e = r.get("ext") or "(없음)"
+        c, s = dist.get(e, (0, 0))
+        dist[e] = (c + 1, s + r.get("size", 0))
+    print("\n유형별 분포:")
+    for e in sorted(dist, key=lambda k: dist[k][1], reverse=True):
+        c, s = dist[e]
+        print(f"  {e:<6}: {c:>5}개  {human_size(s):>9}")
+
+    # 파일명 유효성 위반 (No.5) / PDF·포맷 변환 대상 (No.6)
+    nName = sum(1 for r in rows if r.get("name_issue"))
+    nConv = sum(1 for r in rows if r.get("convert"))
+    if nName or nConv:
+        print(f"\n파일명 검사 위반={nName}  변환 대상={nConv}")
+
+    # 대용량 2단계: 업로드불가(2GB↑) / 대용량(경고선↑)
+    over = sorted((r for r in rows if r.get("size", 0) > OVERSIZE_BYTES
+                   and r.get("dup") != "중복"),
+                  key=lambda r: r.get("size", 0), reverse=True)
+    if over:
+        tail = "  → --move 시 _oversize 폴더로 분리" if a.move else ""
+        print(f"\n⛔ 업로드 불가 {len(over)}개 (>2GB, Uploader 제한) — 분할/변환 필수{tail}:")
+        for r in over:
+            print(f"  {human_size(r['size']):>9}  {r['name']}")
+
+    large = sorted((r for r in rows if LARGE_BYTES < r.get("size", 0) <= OVERSIZE_BYTES
                     and r.get("ok") and r.get("dup") != "중복"),
                    key=lambda r: r.get("size", 0), reverse=True)
     if large:
         tail = "  → --move 시 _large 폴더로 분리" if a.move else ""
         print(f"\n⚠ 대용량 {len(large)}개 (>{human_size(LARGE_BYTES)}) — 파싱 비용↓ 위해 축소 권장{tail}:")
         for r in large:
-            hint = " (이미지 다수 추정 → 이미지 압축)" if r.get("img_signal") else ""
+            hint = " (이미지 다수 추정 → 이미지 축소)" if r.get("img_signal") else ""
             print(f"  {human_size(r['size']):>9}  {r['name']}{hint}")
 
     # 이동 (CSV보다 먼저 → CSV에 이동 후 경로가 기록되도록)
@@ -490,10 +587,12 @@ def main():
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["번호", "파일명", "경로", "형식", "권장_파싱방식", "이유",
-                    "용량", "용량_추천", "중복여부", "원본파일", "정상여부"])
+                    "용량", "용량_상태", "용량_추천", "변환대상", "이름검사",
+                    "중복여부", "원본파일", "정상여부"])
         for n, r in enumerate(rows, 1):
             w.writerow([n, nfc(r["name"]), nfc(r["file"]), r.get("ext", ""), r.get("parser", "-"),
-                        r.get("why", "-"), human_size(r.get("size", 0)), size_recommendation(r),
+                        r.get("why", "-"), human_size(r.get("size", 0)), size_bucket(r),
+                        size_recommendation(r), r.get("convert", ""), nfc(r.get("name_issue", "")),
                         r.get("dup", "-"), nfc(r.get("origin", "")), r.get("reason", "-")])
     print(f"CSV 저장: {csv_path}")
 
