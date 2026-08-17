@@ -1,4 +1,4 @@
-# salesforce_triage-docs
+# triage_docs
 
 로컬 문서(PDF · Word · PPT · Excel)를 **Salesforce Data 360에 업로드하기 전에** 사전 트리아지(triage)하는 CLI 도구입니다.
 각 파일에 어떤 파서(**Default** / **Docling** / **LLM Parser** / **검토**)가 알맞은지 판정하고, 중복·손상·대용량을 가려내 **단일 CSV 한 장**으로 정리합니다. 선택적으로 판정 결과대로 파일을 폴더 분류(이동)까지 해 줍니다.
