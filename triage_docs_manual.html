@@ -86,7 +86,7 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
 <table>
   <tr><th>옵션</th><th>설명</th></tr>
   <tr><td><code>--csv &lt;경로&gt;</code></td><td>결과 파일의 저장 위치입니다(CSV는 Excel에서 한글이 깨지지 않는 UTF-8 BOM). 경로가 <code>.xlsx</code>로 끝나면 자동으로 엑셀로 저장합니다. 생략하면 <code>--move</code> 목적지(<code>_triage</code>) 바로 밑에, 이동이 없으면 스캔한 폴더에 <code>Triage 결과.csv</code>(또는 <code>--xlsx</code>면 <code>.xlsx</code>)로 저장합니다.</td></tr>
-  <tr><td><code>--xlsx</code></td><td>CSV 대신 <b>엑셀(<code>.xlsx</code>)</b>로 저장합니다. <b><code>요약</code> 시트</b>(유형별 분포·파서별 집계·업로드불가/대용량/손상/파일명 위반 목록 = 콘솔에 찍히는 요약 그대로)와 <b><code>상세</code> 시트</b>(파일별 판정 표) 두 장이 만들어집니다. <span class="muted">외부 라이브러리 없이 표준 라이브러리만으로 생성하므로 별도 설치가 필요 없습니다.</span></td></tr>
+  <tr><td><code>--xlsx</code></td><td>CSV 대신 <b>엑셀(<code>.xlsx</code>)</b>로 저장합니다. <b><code>요약</code> 시트</b>(유형별 분포·파서별 집계·업로드불가/대용량/손상/파일명 위반 목록 = 콘솔에 찍히는 요약 그대로)와 <b><code>상세</code> 시트</b>(파일별 판정 표) 두 장이 만들어집니다. 요약 시트에는 <b>서식</b>(제목·헤더 배경, 업로드불가·손상은 빨강, 대용량은 주황 강조, 열너비)과 <b>파이차트 3종</b>(파서별 비율·형식별 개수·상태 구성)이 함께 들어갑니다. <span class="muted">외부 라이브러리 없이 표준 라이브러리만으로 생성하므로 별도 설치가 필요 없습니다.</span></td></tr>
   <tr><td><code>--move</code></td><td>판정 결과대로 파일을 하위 폴더로 <b>이동</b>합니다(4·6절 참고). 지정하지 않으면 파일은 그대로 두고 결과 파일만 만듭니다.</td></tr>
   <tr><td><code>--dest &lt;폴더&gt;</code></td><td><code>--move</code>로 옮길 목적지 폴더입니다(기본값 <code>~/Downloads/_triage</code>).</td></tr>
   <tr><td><code>--large-mb &lt;MB&gt;</code></td><td>대용량 경고선(MB)입니다. 기본값 75. 넘으면 <code>_large</code>로 분리하고 축소를 권합니다. <span class="muted">2&nbsp;GB 업로드불가 기준은 고정이라 이 값과 무관합니다.</span></td></tr>
@@ -230,6 +230,7 @@ python3 triage_docs.py fileA.pdf ~/docs deckB.pptx --csv out.csv</code></pre>
 <p>기본 출력은 아래 컬럼을 가진 <b>상세 표 한 장(CSV)</b>입니다. <code>--xlsx</code>(또는 <code>.xlsx</code> 경로)를 주면
 같은 상세 표가 <code>상세</code> 시트에 들어가고, 그 앞에 <code>요약</code> 시트가 한 장 더 붙습니다 —
 유형별 분포, 파서별 집계, 업로드불가·대용량·손상·파일명 위반 목록(화면 아래에 찍히는 요약)이 그대로 표로 담깁니다.</p>
+<p>요약 시트는 눈으로 훑기 좋게 <b>서식</b>이 입혀집니다 — 제목과 표 헤더에 배경색, 업로드불가·손상 행은 빨강, 대용량 행은 주황으로 강조하고, 열너비도 맞춥니다. 시트 하단에는 차트가 참조하는 <b>차트데이터 블록</b>이 있고, 이를 원본으로 <b>파이차트 3종</b>(파서별 비율·형식별 개수·상태 구성)이 그려집니다. 항목이 1개뿐인 차트(예: 형식이 한 종류일 때)는 파이로 의미가 없으므로 자동으로 생략됩니다. 차트·서식은 모두 표준 라이브러리로 만든 OOXML이라 Excel·Numbers에서 그대로 열립니다.</p>
 <table>
   <tr><th>컬럼 (상세 시트 / CSV)</th><th>내용</th></tr>
   <tr><td>번호</td><td>정렬한 뒤 매긴 순번</td></tr>

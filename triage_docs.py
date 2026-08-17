@@ -498,9 +498,21 @@ def resolve_out_path(csv_arg, paths, out_root=None, want_xlsx=False):
 
 
 # ============================== XLSX (stdlib) ================================
-# openpyxl 등 외부 의존성 없이 zipfile+XML로 최소 스펙 .xlsx를 직접 생성.
+# openpyxl 등 외부 의존성 없이 zipfile+XML로 .xlsx를 직접 생성.
 # 이 도구는 이미 Office=ZIP+XML을 읽고 있으므로, 쓰는 쪽도 표준 라이브러리로 해결한다.
-# 지원: 여러 시트, 헤더 굵게(1행), 문자열/숫자 자동 구분. (서식은 최소한만)
+# 지원: 여러 시트 / 셀 서식(배경·굵게·강조색·테두리) / 열너비 / DrawingML 파이차트.
+
+# cellXfs 인덱스 — styles.xml의 <cellXfs> 순서와 1:1로 맞춰야 함(순서 바꾸면 깨짐).
+S_CELL      = 0   # 일반 셀
+S_HDR       = 1   # 표 헤더(남색 배경 + 흰 굵은 글씨 + 테두리)
+S_TITLE     = 2   # 시트 제목(굵게 14pt)
+S_SECTION   = 3   # 섹션 소제목(연회색 배경 + 굵게)
+S_HL_RED    = 4   # 강조: 업로드불가·손상 (연빨강)
+S_HL_ORANGE = 5   # 강조: 대용량 (연주황)
+S_HL_GREEN  = 6   # 강조: 정상 (연녹)
+S_NUM       = 7   # 정수(개수) — 테두리 있는 일반 숫자
+
+
 def _xl_col(idx):
     """0-based 열 인덱스 → 엑셀 열 문자(A, B, ..., Z, AA...)."""
     s = ""
@@ -516,16 +528,35 @@ def _xl_esc(s):
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def _sheet_xml(rows):
-    """2차원 리스트(rows) → worksheet XML. 1행은 헤더(style s=1: 굵게).
-    각 셀: 숫자(int/float)면 <c t=n>, 그 외 문자열은 inlineStr로 기록."""
+def _sheet_xml(rows, styles_map=None, col_widths=None, drawing_rid=None):
+    """2차원 리스트(rows) → worksheet XML.
+      styles_map : {(행0based, 열0based): cellXf 인덱스} — 지정 셀만 서식 오버라이드.
+                   없으면 1행(헤더)만 S_HDR.
+      col_widths : [(min1based, max1based, width), ...] — 열너비.
+      drawing_rid: 주면 <drawing r:id=..>를 추가(차트 앵커).
+    각 셀: 숫자(int/float)면 <c><v>, 그 외 문자열은 inlineStr."""
+    styles_map = styles_map or {}
     out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-           '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>']
+           '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+           'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">']
+    if col_widths:
+        out.append('<cols>')
+        for lo, hi, w in col_widths:
+            out.append(f'<col min="{lo}" max="{hi}" width="{w}" customWidth="1"/>')
+        out.append('</cols>')
+    out.append('<sheetData>')
     for r_i, row in enumerate(rows, 1):
         out.append(f'<row r="{r_i}">')
         for c_i, val in enumerate(row):
             ref = f"{_xl_col(c_i)}{r_i}"
-            style = ' s="1"' if r_i == 1 else ""
+            # styles_map 우선, 없으면 헤더행만 S_HDR
+            if (r_i - 1, c_i) in styles_map:
+                s_idx = styles_map[(r_i - 1, c_i)]
+            elif r_i == 1:
+                s_idx = S_HDR
+            else:
+                s_idx = None
+            style = f' s="{s_idx}"' if s_idx is not None else ""
             if isinstance(val, bool):
                 val = str(val)
             if isinstance(val, (int, float)):
@@ -534,24 +565,165 @@ def _sheet_xml(rows):
                 txt = _xl_esc("" if val is None else val)
                 out.append(f'<c r="{ref}"{style} t="inlineStr"><is><t xml:space="preserve">{txt}</t></is></c>')
         out.append('</row>')
-    out.append('</sheetData></worksheet>')
+    out.append('</sheetData>')
+    if drawing_rid:
+        out.append(f'<drawing r:id="{drawing_rid}"/>')
+    out.append('</worksheet>')
     return "".join(out)
 
 
-def write_xlsx(path, sheets):
+_C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_XDR_NS = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+
+
+def _chart_xml(sheet_name, cats, vals, title, first_row):
+    """파이차트 하나의 chartN.xml. cats/vals는 시트의 first_row(1based)부터
+    A열=카테고리, B열=값으로 이미 기록돼 있다고 가정하고 그 셀을 strRef/numRef로 참조."""
+    n = len(cats)
+    lo, hi = first_row, first_row + n - 1
+    catf = f"{sheet_name}!$A${lo}:$A${hi}"
+    valf = f"{sheet_name}!$B${lo}:$B${hi}"
+    cat_pts = "".join(f'<c:pt idx="{i}"><c:v>{_xl_esc(c)}</c:v></c:pt>' for i, c in enumerate(cats))
+    val_pts = "".join(f'<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>' for i, v in enumerate(vals))
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<c:chartSpace xmlns:c="{_C_NS}" xmlns:a="{_A_NS}" xmlns:r="{_R_NS}"><c:chart>'
+        '<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/>'
+        f'<a:p><a:pPr><a:defRPr b="1" sz="1200"/></a:pPr><a:r><a:t>{_xl_esc(title)}</a:t></a:r></a:p>'
+        '</c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/>'
+        '<c:plotArea><c:layout/><c:pieChart><c:varyColors val="1"/><c:ser>'
+        '<c:idx val="0"/><c:order val="0"/>'
+        f'<c:cat><c:strRef><c:f>{catf}</c:f>'
+        f'<c:strCache><c:ptCount val="{n}"/>{cat_pts}</c:strCache></c:strRef></c:cat>'
+        f'<c:val><c:numRef><c:f>{valf}</c:f>'
+        f'<c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="{n}"/>{val_pts}</c:numCache>'
+        '</c:numRef></c:val></c:ser>'
+        '<c:dLbls><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/>'
+        '<c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>'
+        '<c:firstSliceAng val="0"/></c:pieChart></c:plotArea>'
+        '<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>'
+        '<c:plotVisOnly val="1"/></c:chart></c:chartSpace>')
+
+
+def _drawing_xml(anchors):
+    """anchors = [(col_from, row_from, col_to, row_to, rId, name), ...] → drawing1.xml.
+    차트마다 twoCellAnchor 하나. 좌표는 0-based 셀 인덱스."""
+    body = []
+    for i, (cf, rf, ct, rt, rid, name) in enumerate(anchors, 1):
+        body.append(
+            '<xdr:twoCellAnchor>'
+            f'<xdr:from><xdr:col>{cf}</xdr:col><xdr:colOff>0</xdr:colOff>'
+            f'<xdr:row>{rf}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
+            f'<xdr:to><xdr:col>{ct}</xdr:col><xdr:colOff>0</xdr:colOff>'
+            f'<xdr:row>{rt}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
+            '<xdr:graphicFrame macro="">'
+            f'<xdr:nvGraphicFramePr><xdr:cNvPr id="{i + 1}" name="{_xl_esc(name)}"/>'
+            '<xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>'
+            '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>'
+            f'<a:graphic><a:graphicData uri="{_C_NS}">'
+            f'<c:chart xmlns:c="{_C_NS}" xmlns:r="{_R_NS}" r:id="{rid}"/>'
+            '</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>')
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<xdr:wsDr xmlns:xdr="{_XDR_NS}" xmlns:a="{_A_NS}" xmlns:r="{_R_NS}" xmlns:c="{_C_NS}">'
+        + "".join(body) + '</xdr:wsDr>')
+
+
+# styles.xml — 폰트/채움/테두리/서식 조합. cellXfs 순서 = 위 S_* 상수와 1:1.
+#   fills: 0 없음 / 1 gray125(예약) / 2 헤더남색 / 3 섹션연회색 / 4 빨강 / 5 주황 / 6 연녹
+_STYLES_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    '<fonts count="4">'
+    '<font><sz val="11"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="14"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="11"/><name val="Calibri"/></font>'
+    '</fonts>'
+    '<fills count="7">'
+    '<fill><patternFill patternType="none"/></fill>'
+    '<fill><patternFill patternType="gray125"/></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FF1F4E78"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFFFEB9C"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/></patternFill></fill>'
+    '</fills>'
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+    '<cellStyleXfs count="1"><xf/></cellStyleXfs>'
+    '<cellXfs count="8">'
+    '<xf fontId="0" fillId="0" borderId="0"/>'
+    '<xf fontId="1" fillId="2" borderId="0" applyFont="1" applyFill="1"/>'
+    '<xf fontId="2" fillId="0" borderId="0" applyFont="1"/>'
+    '<xf fontId="3" fillId="3" borderId="0" applyFont="1" applyFill="1"/>'
+    '<xf fontId="0" fillId="4" borderId="0" applyFill="1"/>'
+    '<xf fontId="0" fillId="5" borderId="0" applyFill="1"/>'
+    '<xf fontId="0" fillId="6" borderId="0" applyFill="1"/>'
+    '<xf fontId="0" fillId="0" borderId="0"/>'
+    '</cellXfs>'
+    '</styleSheet>')
+
+
+def write_xlsx(path, sheets, sheet_styles=None, sheet_cols=None, charts=None):
     """sheets = [(시트이름, [[행]...]), ...] 를 하나의 .xlsx로 저장.
+      sheet_styles: {sheet_index0based: {(행,열): cellXf}} — 셀 서식 오버라이드.
+      sheet_cols  : {sheet_index0based: [(min,max,width), ...]} — 열너비.
+      charts      : {sheet_index0based: [(cats, vals, title, data_first_row,
+                        (col_from,row_from,col_to,row_to)), ...]}
+                    — 해당 시트에 파이차트 삽입(그 시트에 데이터 셀이 이미 있어야 함).
     NFC 정규화는 호출측에서 끝내고 넘긴다고 가정."""
+    sheet_styles = sheet_styles or {}
+    sheet_cols = sheet_cols or {}
+    charts = charts or {}
     n = len(sheets)
+
+    # 차트가 붙는 시트별로 drawing/chart 파트를 채번
+    #   chart_parts: [(chart_no, xml)], sheet_drawing: {sheet_i1based: (drawing_no, [anchor..])}
+    chart_parts = []
+    drawing_parts = []          # [(drawing_no, xml)]
+    drawing_rels = []           # [(drawing_no, [(rId, chart_no), ...])]
+    sheet_to_drawing = {}       # sheet_i(1based) -> drawing_no
+    chart_no = 0
+    drawing_no = 0
+    for si0, clist in charts.items():
+        if not clist:
+            continue
+        drawing_no += 1
+        si1 = si0 + 1
+        sheet_to_drawing[si1] = drawing_no
+        anchors = []
+        rels = []
+        for (cats, vals, title, first_row, box) in clist:
+            chart_no += 1
+            chart_parts.append((chart_no, _chart_xml(f"'{_xl_esc(sheets[si0][0])[:31]}'",
+                                                      cats, vals, title, first_row)))
+            rid = f"rId{len(rels) + 1}"
+            cf, rf, ct, rt = box
+            anchors.append((cf, rf, ct, rt, rid, title))
+            rels.append((rid, chart_no))
+        drawing_parts.append((drawing_no, _drawing_xml(anchors)))
+        drawing_rels.append((drawing_no, rels))
+
+    # ---- [Content_Types].xml ----
+    ov = [
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>',
+    ]
+    ov += [f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+           for i in range(1, n + 1)]
+    ov += [f'<Override PartName="/xl/drawings/drawing{d}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
+           for d, _ in drawing_parts]
+    ov += [f'<Override PartName="/xl/charts/chart{c}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+           for c, _ in chart_parts]
     content_types = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
-        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
-        + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-                  for i in range(1, n + 1))
-        + '</Types>')
+        + "".join(ov) + '</Types>')
+
     root_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -572,25 +744,38 @@ def write_xlsx(path, sheets):
                   for i in range(1, n + 1))
         + f'<Relationship Id="rId{n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
         + '</Relationships>')
-    # styles.xml: 폰트 2개(일반 / 굵게), cellXfs 2개(s=0 일반, s=1 굵게)
-    styles = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
-        '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
-        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
-        '<borders count="1"><border/></borders>'
-        '<cellStyleXfs count="1"><xf/></cellStyleXfs>'
-        '<cellXfs count="2"><xf fontId="0"/><xf fontId="1" applyFont="1"/></cellXfs>'
-        '</styleSheet>')
+
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", content_types)
         z.writestr("_rels/.rels", root_rels)
         z.writestr("xl/workbook.xml", workbook)
         z.writestr("xl/_rels/workbook.xml.rels", wb_rels)
-        z.writestr("xl/styles.xml", styles)
+        z.writestr("xl/styles.xml", _STYLES_XML)
         for i, (_, rows) in enumerate(sheets, 1):
-            z.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows))
+            drid = None
+            if i in sheet_to_drawing:
+                drid = "rId1"  # 시트→drawing 관계는 rId1로 고정
+            z.writestr(f"xl/worksheets/sheet{i}.xml",
+                       _sheet_xml(rows, sheet_styles.get(i - 1), sheet_cols.get(i - 1), drid))
+            if i in sheet_to_drawing:
+                d = sheet_to_drawing[i]
+                z.writestr(f"xl/worksheets/_rels/sheet{i}.xml.rels",
+                           '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                           '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                           f'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing{d}.xml"/>'
+                           '</Relationships>')
+        for d, xml in drawing_parts:
+            z.writestr(f"xl/drawings/drawing{d}.xml", xml)
+        for d, rels in drawing_rels:
+            body = "".join(
+                f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart{cno}.xml"/>'
+                for rid, cno in rels)
+            z.writestr(f"xl/drawings/_rels/drawing{d}.xml.rels",
+                       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                       + body + '</Relationships>')
+        for c, xml in chart_parts:
+            z.writestr(f"xl/charts/chart{c}.xml", xml)
 
 
 def main():
@@ -739,38 +924,106 @@ def main():
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
     if want_xlsx:
-        # ---- '요약' 시트: 콘솔에 찍히던 요약을 그대로 표로 (섹션별 소제목 + 데이터) ----
-        s = [["Data 360 업로드 사전점검 요약"], [],
-             ["항목", "값"],
-             ["총 파일 수", len(rows)],
-             ["LLM Parser", nLLM], ["Docling", nDoc], ["Default", nDef], ["검토", nRev],
-             ["손상", nBad], ["  └ 암호화", nEnc],
-             ["중복", nDup],
-             ["파일명 검사 위반", nName], ["변환 대상", nConv],
-             ["업로드 불가(>2GB)", len(over)], [f"대용량(>{human_size(LARGE_BYTES)})", len(large)],
-             [],
-             ["유형별 분포"], ["형식", "개수", "총용량"]]
+        # ---- '요약' 시트: 콘솔 요약을 표로 + 셀 서식 + 파이차트 3종 ----
+        # s를 한 줄씩 쌓으면서 styles{(행,열):cellXf}를 같이 기록해 인덱스를 정확히 맞춘다.
+        s = []
+        styles = {}          # {(row0based, col0based): S_*}
+
+        def add(row, *, style_row=None, cells=None):
+            """행 추가 + 서식 지정. style_row: 행 전체 열에 같은 스타일.
+            cells: {열0based: S_*} 개별 열 지정. 반환: 방금 추가한 행의 0based 인덱스."""
+            ri = len(s)
+            s.append(row)
+            if style_row is not None:
+                for ci in range(len(row)):
+                    styles[(ri, ci)] = style_row
+            for ci, st in (cells or {}).items():
+                styles[(ri, ci)] = st
+            return ri
+
+        add(["Data 360 업로드 사전점검 요약"], style_row=S_TITLE)
+        add([])
+        add(["항목", "값"], style_row=S_HDR)
+        add(["총 파일 수", len(rows)])
+        add(["LLM Parser", nLLM]); add(["Docling", nDoc]); add(["Default", nDef]); add(["검토", nRev])
+        add(["손상", nBad], cells=({0: S_HL_RED, 1: S_HL_RED} if nBad else None))
+        add(["  └ 암호화", nEnc])
+        add(["중복", nDup])
+        add(["파일명 검사 위반", nName]); add(["변환 대상", nConv])
+        add(["업로드 불가(>2GB)", len(over)], cells=({0: S_HL_RED, 1: S_HL_RED} if over else None))
+        add([f"대용량(>{human_size(LARGE_BYTES)})", len(large)],
+            cells=({0: S_HL_ORANGE, 1: S_HL_ORANGE} if large else None))
+        add([])
+        add(["유형별 분포"], style_row=S_SECTION)
+        add(["형식", "개수", "총용량"], style_row=S_HDR)
         for e in sorted(dist, key=lambda k: dist[k][1], reverse=True):
             c, sz = dist[e]
-            s.append([e, c, human_size(sz)])
+            add([e, c, human_size(sz)])
         if over:
-            s += [[], ["⛔ 업로드 불가 (>2GB, 분할/변환 필수)"], ["용량", "파일명"]]
-            s += [[human_size(r["size"]), nfc(r["name"])] for r in over]
+            add([]); add(["⛔ 업로드 불가 (>2GB, 분할/변환 필수)"], style_row=S_SECTION)
+            add(["용량", "파일명"], style_row=S_HDR)
+            for r in over:
+                add([human_size(r["size"]), nfc(r["name"])], style_row=S_HL_RED)
         if large:
-            s += [[], [f"⚠ 대용량 (>{human_size(LARGE_BYTES)}, 축소 권장)"], ["용량", "파일명"]]
-            s += [[human_size(r["size"]), nfc(r["name"])
-                   + (" (이미지 다수 추정)" if r.get("img_signal") else "")] for r in large]
+            add([]); add([f"⚠ 대용량 (>{human_size(LARGE_BYTES)}, 축소 권장)"], style_row=S_SECTION)
+            add(["용량", "파일명"], style_row=S_HDR)
+            for r in large:
+                add([human_size(r["size"]), nfc(r["name"])
+                     + (" (이미지 다수 추정)" if r.get("img_signal") else "")], style_row=S_HL_ORANGE)
         bad_rows = [r for r in rows if not r.get("ok")]
         if bad_rows:
-            s += [[], ["손상 · 암호화 · 미지원"], ["파일명", "사유"]]
-            s += [[nfc(r["name"]), r.get("reason", "-")] for r in bad_rows]
+            add([]); add(["손상 · 암호화 · 미지원"], style_row=S_SECTION)
+            add(["파일명", "사유"], style_row=S_HDR)
+            for r in bad_rows:
+                add([nfc(r["name"]), r.get("reason", "-")], style_row=S_HL_RED)
         name_bad = [r for r in rows if r.get("name_issue")]
         if name_bad:
-            s += [[], ["파일명 검사 위반"], ["파일명", "사유"]]
-            s += [[nfc(r["name"]), nfc(r["name_issue"])] for r in name_bad]
+            add([]); add(["파일명 검사 위반"], style_row=S_SECTION)
+            add(["파일명", "사유"], style_row=S_HDR)
+            for r in name_bad:
+                add([nfc(r["name"]), nfc(r["name_issue"])])
 
-        write_xlsx(out_path, [("요약", s), ("상세", [header] + detail_rows)])
-        print(f"XLSX 저장: {out_path}  (시트: 요약 / 상세)")
+        # ---- 차트용 데이터 블록 (값>0만) — 각 블록 첫 데이터행을 차트가 참조 ----
+        n_ok_uniq = sum(1 for r in rows if r.get("ok") and r.get("dup") != "중복")
+        n_dmg = sum(1 for r in rows if not r.get("ok"))  # 손상·암호화·미지원
+        chart_specs = []  # (cats, vals, title, first_row_1based, box)
+
+        def add_chart_block(title, pairs, box):
+            """pairs=[(라벨,값)...] 중 값>0만. 블록: 소제목행 + 데이터행들.
+            데이터행 A열=라벨 B열=값. 2개 미만이면 차트 생략(파이 무의미)."""
+            pairs = [(k, v) for k, v in pairs if v > 0]
+            if len(pairs) < 2:
+                return
+            add([f"[차트데이터] {title}"], style_row=S_SECTION)
+            first = len(s) + 1  # 다음에 추가할 행의 1based 번호
+            for k, v in pairs:
+                add([k, v])
+            cats = [k for k, _ in pairs]
+            vals = [v for _, v in pairs]
+            chart_specs.append((cats, vals, title, first, box))
+
+        add([])
+        add(["── 차트 데이터 (아래 표는 위 파이차트의 원본) ──"], style_row=S_SECTION)
+        # 차트는 D열(3)~L열(11)에 세로로 3개 배치 (겹침 방지)
+        add_chart_block("파서별 비율",
+                        [("LLM Parser", nLLM), ("Docling", nDoc), ("Default", nDef), ("검토", nRev)],
+                        (3, 1, 11, 16))
+        add_chart_block("형식별 개수",
+                        [(e, dist[e][0]) for e in sorted(dist, key=lambda k: dist[k][1], reverse=True)],
+                        (3, 17, 11, 32))
+        add_chart_block("상태 구성",
+                        [("정상", n_ok_uniq), ("중복", nDup), ("손상·암호화", n_dmg),
+                         ("대용량", len(large)), ("업로드불가", len(over))],
+                        (3, 33, 11, 48))
+
+        col_widths = [(1, 1, 30), (2, 2, 14), (3, 3, 12)]          # 요약: A 넓게
+        detail_widths = [(2, 3, 42), (5, 6, 26), (14, 14, 34)]     # 상세: 파일명·경로·이유·사유
+        charts = {0: chart_specs} if chart_specs else None
+        write_xlsx(out_path, [("요약", s), ("상세", [header] + detail_rows)],
+                   sheet_styles={0: styles}, sheet_cols={0: col_widths, 1: detail_widths},
+                   charts=charts)
+        nchart = len(chart_specs)
+        print(f"XLSX 저장: {out_path}  (시트: 요약 / 상세, 차트 {nchart})")
     else:
         with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
